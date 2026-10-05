@@ -52,21 +52,32 @@ try {
 // RMS proves there is sound; it says nothing about whether a viewer can hear it, or whether it
 // clips. EBU R128 integrated loudness and true peak do. ffmpeg reports both on stderr, and the
 // summary comes last, so take the last match. A value that could not be measured fails.
-const ffStderr = (args) => spawnSync("ffmpeg", ["-hide_banner", "-nostats", ...args], { encoding: "utf8", maxBuffer: 1 << 28 }).stderr || "";
+// ⚠️ `ran` is the load-bearing part, not the stderr. A probe that never executed emits no
+// matches, and "no matches" is indistinguishable from a clean result unless the exit status is
+// read: missing ffmpeg, an unreadable file, a stream map that matches nothing and a renamed
+// filter all look exactly like "nothing wrong here". An absence is only evidence when the thing
+// that would have reported a presence is known to have run.
+const ffStderr = (args) => {
+  const r = spawnSync("ffmpeg", ["-hide_banner", "-nostats", ...args], { encoding: "utf8", maxBuffer: 1 << 28 });
+  return { ran: r.status === 0, why: r.error ? r.error.message : `ffmpeg exit ${r.status}`, stderr: r.stderr || "" };
+};
 const lastNumber = (text, re) => { const m = [...text.matchAll(re)]; return m.length ? Number(m[m.length - 1][1]) : NaN; };
 if (a) {
   const r128 = ffStderr(["-i", MP4, "-map", "0:a:0", "-af", "ebur128=peak=true", "-f", "null", "-"]);
-  const lufs = lastNumber(r128, /I:\s+(-?[\d.]+) LUFS/g);
-  const tp = lastNumber(r128, /Peak:\s+(-?[\d.]+) dBFS/g);
-  (lufs >= LUFS_MIN && lufs <= LUFS_MAX ? ok : fail).push(Number.isFinite(lufs) ? `loudness ${lufs} LUFS (window ${LUFS_MIN}..${LUFS_MAX})` : "loudness could not be measured");
-  (tp <= TP_MAX ? ok : fail).push(Number.isFinite(tp) ? `true peak ${tp} dBTP (ceiling ${TP_MAX})` : "true peak could not be measured");
+  const lufs = lastNumber(r128.stderr, /I:\s+(-?[\d.]+) LUFS/g);
+  const tp = lastNumber(r128.stderr, /Peak:\s+(-?[\d.]+) dBFS/g);
+  (lufs >= LUFS_MIN && lufs <= LUFS_MAX ? ok : fail).push(Number.isFinite(lufs) ? `loudness ${lufs} LUFS (window ${LUFS_MIN}..${LUFS_MAX})` : `loudness could not be measured (${r128.why})`);
+  (tp <= TP_MAX ? ok : fail).push(Number.isFinite(tp) ? `true peak ${tp} dBTP (ceiling ${TP_MAX})` : `true peak could not be measured (${r128.why})`);
 }
 
 // a well-formed file can still be black for a minute: the app never painted, or a navigation
 // failed and the recorder kept going
 const bd = ffStderr(["-i", MP4, "-map", "0:v:0", "-vf", `blackdetect=d=${BLACK_SECONDS}:pix_th=0.10`, "-an", "-f", "null", "-"]);
-const black = [...bd.matchAll(/black_start:([\d.]+) black_end:([\d.]+)/g)].map((m) => `${Number(m[1]).toFixed(1)}-${Number(m[2]).toFixed(1)}s`);
-(black.length === 0 ? ok : fail).push(black.length ? `black for ${BLACK_SECONDS}s or more at ${black.join(", ")}` : `no black stretch of ${BLACK_SECONDS}s or more`);
+const black = [...bd.stderr.matchAll(/black_start:([\d.]+) black_end:([\d.]+)/g)].map((m) => `${Number(m[1]).toFixed(1)}-${Number(m[2]).toFixed(1)}s`);
+(bd.ran && black.length === 0 ? ok : fail).push(
+  !bd.ran ? `black detection did not run, so no verdict (${bd.why})`
+    : black.length ? `black for ${BLACK_SECONDS}s or more at ${black.join(", ")}`
+      : `no black stretch of ${BLACK_SECONDS}s or more`);
 
 const assPath = join(OUT, "captions.ass");
 const cues = existsSync(assPath)
